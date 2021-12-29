@@ -1,0 +1,96 @@
+# ------------------------- set global variable -------------------------
+env:
+  # package xml file name
+  packageXml: partialPackage.xml
+  # target salesforce
+  targetSF: sbtest11
+# -----------------------------------------------------------------------
+
+
+name: Relase To sbtest11
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "commitId"
+        required: true
+        default: ""
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout Source from Github
+      - name: 'Checkout source code'
+        uses: actions/checkout@v2
+        with: 
+          fetch-depth: 0
+      
+      # Checkout source by commitId
+      # execute when run workflow manually and commitId is not null
+      - name: 'Checkout source by commitId'
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' }}
+        run: git reset --hard ${{ github.event.inputs.ref }}
+
+      # Install Salesforce CLI
+      - name: 'Install Salesforce CLI'
+        run: |
+            wget https://developer.salesforce.com/media/salesforce-cli/sfdx/channels/stable/sfdx-linux-x64.tar.xz
+            mkdir ~/sfdx
+            tar xJf sfdx-linux-x64.tar.xz -C ~/sfdx --strip-components 1
+            echo "$HOME/sfdx/bin" >> $GITHUB_PATH
+            ~/sfdx/bin/sfdx version
+
+      # Store secret for dev hub
+      - name: 'Populate auth file with SFDX_URL secret'
+        shell: bash
+        run: 'echo ${{ secrets.SBTEST11 }} > SFDX_AUTH_INFO'
+
+      # Authenticate against dev hub
+      - name: 'Authenticate against dev hub'
+        run: sfdx force:auth:sfdxurl:store -f SFDX_AUTH_INFO -s -a AUTH_INFO
+
+      # Deploy source And Run Apex Test
+      - name: Deploy source And Run Apex Test
+        shell: bash
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: |
+          result=$(sudo grep -c "<name>ApexClass</name>" manifest/${{ env.packageXml }} || true)
+          if [ $result -eq 0 ]; then
+            sfdx force:source:deploy -x manifest/${{ env.packageXml }} -u AUTH_INFO --json --loglevel fatal --testlevel NoTestRun
+          else
+            result=$(sudo grep -c '<members>[A-Za-z0-9]*Test[s]*</members>' manifest/${{ env.packageXml }} || true)
+            if [ $result -eq 0 ]; then
+              echo "ApexClassに紐づくテストクラスを${{ env.packageXml }}ファイルに記載してください。"
+              exit 1
+            else
+              sudo cat manifest/${{ env.packageXml }} | grep -o -P '<members>[A-Za-z0-9_]*Test[s]*</members>' | sed 's/<members>//g' | sed 's/<\/members>//g' | tr '\n' ',' | sed s/,$// > ./TEST_CLASS
+              sfdx force:source:deploy -x manifest/${{ env.packageXml }} -u AUTH_INFO --json --loglevel fatal --testlevel RunSpecifiedTests --runtests $(cat ./TEST_CLASS)
+            fi
+          fi
+
+      # - name: Deploy Success Slack Notification
+      #   if: success()
+      #   uses: rtCamp/action-slack-notify@v2
+      #   env:
+      #     SLACK_CHANNEL: developer
+      #     SLACK_MESSAGE: 'Deployed to ${{ env.targetSF }} Sandbox Successfully'
+      #     SLACK_TITLE: Deploy Successfully
+      #     SLACK_USERNAME: ${{ github.actor }}
+      #     SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      #     SLACK_ICON: \":bell:\"
+      #     SLACK_FOOTER: ''
+
+      # - name: Deploy Success Slack Notification
+      #   if: failure()
+      #   uses: rtCamp/action-slack-notify@v2
+      #   env:
+      #     SLACK_CHANNEL: developer
+      #     SLACK_MESSAGE: 'Deployed to ${{ env.targetSF }} Sandbox Failured'
+      #     SLACK_TITLE: Deploy Failured
+      #     SLACK_USERNAME: ${{ github.actor }}
+      #     SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      #     SLACK_ICON: \":bell:\"
+      #     SLACK_COLOR: danger
+      #     SLACK_FOOTER: ''
